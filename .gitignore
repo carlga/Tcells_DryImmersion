@@ -1,0 +1,13 @@
+
+*array.gs.heatmap.pdf
+
+plots
+tables
+
+data/facs
+data/ncrna_analysis
+data/rnaseq/exon_counts_all.txt
+data/rnaseq/design_mtx_all.txt
+data/rtqpcr
+
+
