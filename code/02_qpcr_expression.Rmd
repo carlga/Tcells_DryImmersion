@@ -1,0 +1,406 @@
+---
+title: "Step 2.3: RT-qPCR/RNAseq expression measurments for selected genes"
+author: "Carlos Gallardo & Christian Oertlin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+# Set path
+path <- strsplit(dirname(rstudioapi::getActiveDocumentContext()$path), '/')[[1]]
+path <- path[-c(length(path))]
+path <- paste(path, collapse = '/')
+knitr::opts_knit$set(root.dir = path)
+knitr::opts_chunk$set(echo = T, message = F, warning = F, dev = 'cairo_pdf')
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  size <- 'scriptsize'
+  x <- def.chunk.hook(x, options)
+  paste0("\n \\", size, "\n\n", x, "\n\n \\normalsize")
+})
+
+```
+
+```{r}
+# Import libraries and helper functions
+source("code/helper_functions.R")
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(RColorBrewer)
+library(openxlsx)
+library(ComplexHeatmap)
+
+# Colors
+colPals <- vector(mode = "list")
+colPals$time <- setNames(c("#FBAA3E", "#2C83BE", "#3EB6BD", "#A3D5B3", "#CD71A8"),
+                         nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_light <- setNames(c("#FDD6A1", "#A2CDE9", "#AFE2E5", "#DDF0E3", "#E8BDD6"),
+                               nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_dark <- setNames(c("#D87E04", "#174564", "#1F5C60", "#49A065", "#AA3C7E"),
+                              nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$inferno <- c("#000004", "#420A68", "#932667", "#DD513A", "#FCA50A", "#FCFFA4")
+colPals$blood_cells <- setNames(c("#E54D34","#77A2D5","#B58B80"),
+                                nm = c("granulocytes", "lymphocytes", "monocytes"))
+colPals$cell_types <- setNames(c("#83D1F6","#FBAA3E","#FCCA7C","#B58B80","#E54D34",
+                                 "#B3177E","#9A509F","#77A2D5","#CAC1DD","#36B449","#C1C1C1"),
+                               nm = c("B cell", "Macrophage M1", "Macrophage M2", 
+                                      "Monocyte", "Neutrophil", "NK cell", 
+                                      "T cell CD4+ (non-regulatory)", "T cell CD8+", 
+                                      "T cell regulatory (Tregs)", "Myeloid dendritic cell", 
+                                      "uncharacterized cell"))
+colPals$RdBu <- brewer.pal(11, name = "RdBu")
+colPals$biotype <- setNames(c("#395982","#49BED9","#18A38A","#36B449","#826F99",
+                              "#9852A5","#FBAA3E","#FCCA7C","#FCFFA4","#C1C1C1"),
+                            nm = c("protein_coding", "lncRNA", "miRNA", "snoRNA",
+                                   "IG_C_gene", "IG_V_gene", "TR_C_gene",
+                                   "TR_J_gene", "TR_V_gene", "other"))
+colPals$rtqpcr_rnaseq <- setNames(c("#B80D48","#2B6A6C"),
+                                  nm = c("rtqpcr", "rnaseq"))
+
+```
+
+
+# Note:
+
+> Genes for RT-qPCR analysis were selected based on prior interest before RNAseq 
+> analysis and are, thus, not entirely driven by it. Housekeeping gene used is 
+> HPRT1. HPRT1 has been identified as "stable" gene during simulated microgravity
+> conditions (see [Elgindi et al. 2021](https://doi.org/10.3390/cells10081941)).
+
+
+# Load data
+
+```{r}
+# RNA-seq
+RNAseq <- readRDS(file='data/rnaseq/rnaseq_volunteers_9&10_excl.rds')
+DESeq2_DEGs <- readRDS(file='data/rnaseq/DESeq2_DEGs_unfilt_volunteers_9&10_excl.rds')
+DESeq2_DEGs_filt <- readRDS(file='data/rnaseq/DESeq2_DEGs_filt_volunteers_9&10_excl.rds')
+
+# RT-qPCR
+RTqPCR_ct <- openxlsx::read.xlsx('data/rtqpcr/rtqpcr_cq_values.xlsx', 
+                              startRow = 2,
+                              colNames = T, 
+                              rowNames = F) %>% 
+  dplyr::rename(sample = Sample.ID) %>% 
+  filter(!grepl('v\\.(9|10)', sample)) %>% 
+  select_if(~ !any(is.na(.))) %>% 
+  mutate(sample = RNAseq$filt$design$sample) %>% 
+  left_join(RNAseq$filt$design)
+
+```
+
+
+# Housekeeping genes
+
+> Cq measurements for V1 and V2 showed high variability indicating experimental 
+> difficulties with samples from these volunteers. Also note that samples V9 and V10
+> are removed according to our exclusion criteria. Overall, RT-qPCR results show
+> high variability with inconsistent trend for some genes between volunteers. However,
+> we identify genes that show a robust profile in all volunteers.
+
+```{r}
+ggplot(RTqPCR_ct, aes(x=sample, y=HPRT1, fill=volunteer)) +
+  geom_bar(stat='identity', width=0.6, color='black') +
+  scale_fill_manual(values = brewer.pal(11, name = "Set3")) +
+  xlab('') +
+  ylab('Threshold cycle (Ct)') +
+  theme_bw() +
+  theme(
+    axis.text.x.bottom = element_text(angle=90, hjust = 1, vjust = 0.5),
+    legend.justification = 'top'
+  )
+
+```
+
+
+# Normalize expression
+
+```{r}
+# normalize to HPRT1
+RTqPCR_dct <- RTqPCR_ct %>% 
+  column_to_rownames(var = 'sample') %>% 
+  select(-batch,-volunteer,-time) %>% 
+  apply(., MARGIN = 2, FUN=function(x) x - .$HPRT1) %>% 
+  as.data.frame()
+
+RTqPCR_ddct <- RTqPCR_dct %>% 
+  mutate(volunteer = RTqPCR_ct$volunteer,
+         time = RTqPCR_ct$time) %>% 
+  group_by(volunteer) %>% 
+  group_split()
+
+# calculate ddct to day0
+RTqPCR_ddct <- lapply(RTqPCR_ddct, function(df) {
+  
+  volunteer <- df %>% dplyr::pull(volunteer)
+  time <- df %>% dplyr::pull(time)
+  
+  baseline <- df %>% 
+    filter(time == 'day0') %>% 
+    select(-volunteer, -time) %>% 
+    as.numeric()
+  
+  df %>% 
+    select(-volunteer, -time) %>% 
+    apply(., MARGIN = 1, FUN=function(x) x - baseline) %>% 
+    t() %>% 
+    as.data.frame() %>%
+    mutate(volunteer = volunteer,
+           time = time)
+  
+}) %>% bind_rows()
+
+# calculate expression as 2^-ddCT
+RTqPCR_expr <- RTqPCR_ddct
+RTqPCR_expr[,1:39] <- 2^(-RTqPCR_expr[,1:39])
+
+# calculate log2 expression
+RTqPCR_log2expr <- RTqPCR_expr
+RTqPCR_log2expr[,1:39] <- log2(RTqPCR_log2expr[,1:39])
+
+```
+
+
+# Heatmap with quantifications relative to day0
+
+```{r,fig.width=10,fig.height=10}
+m <- t(RTqPCR_log2expr[,1:39])
+colnames(m) <- paste(RTqPCR_log2expr$volunteer, RTqPCR_log2expr$time)
+
+volunteer <- gsub('(v\\d+) .*$', '\\1', colnames(m))
+comparison <- gsub('_', ' Vs ', gsub('v\\d+ ', '', colnames(m)))
+
+ha_top <- HeatmapAnnotation(
+  Volunteer = factor(volunteer, levels = unique(volunteer)),
+  Comparison = factor(comparison, levels = unique(comparison)),
+  col = list(
+    Volunteer = setNames(brewer.pal(length(unique(volunteer)),"Set3"),
+                         nm = unique(volunteer)),
+    Comparison = setNames(brewer.pal(length(unique(comparison)),"Dark2"),
+                         nm = unique(comparison))
+  ),
+  annotation_name_gp = gpar(fontface = 'bold'),
+  border = T
+)
+
+p <- Heatmap(m, name = "log2(2^ddCt)", 
+             cluster_row_slices = F, 
+             cluster_rows = T,
+             column_title = NULL, 
+             column_split=factor(volunteer, levels = unique(volunteer)), 
+             cluster_columns = F,
+             col = circlize::colorRamp2(breaks=seq(-2, 2, length.out=21),
+                                        colors=colorRampPalette(c("#2166AC", "white", "#B2182B"))(21)),
+             top_annotation = ha_top,
+             width = unit(170, "mm"),
+             show_row_names = T, 
+             row_title = NULL, 
+             show_row_dend = T, 
+             row_dend_width=unit(10, "mm"), 
+             row_gap = unit(2, "mm"),
+             show_column_names = T, 
+             column_names_gp = gpar(fontsize = 10), 
+             column_gap = unit(2, "mm"),
+             border = T)
+
+draw(p, merge_legend = T, align_heatmap_legend = "heatmap_top")
+
+```
+
+
+# Compare RT-qPCR and RNAseq
+
+```{r}
+# RT-qPCR genes (without housekeeping: HPRT1)
+RTqPCR_genes <- colnames(RTqPCR_log2expr[,2:39])
+
+# calculate fold changes per volunteer
+RNAseq_log2FC <- calcPerVolunteerFCs(log2(RNAseq$filt$DESeq_norm),
+                                     RNAseq$filt$design,
+                                     comparison = list(
+                                       c("day0","day0"),
+                                       c("day7","day0"),
+                                       c("day14","day0"),
+                                       c("day21","day0"),
+                                       c("day28","day0")
+                                     ))
+RNAseq_log2FC <- RNAseq_log2FC[!apply(RNAseq_log2FC,1,FUN=function(x) any(is.infinite(x))),]
+RNAseq_log2FC[is.na(RNAseq_log2FC)] <- 0
+RNAseq_log2FC <- RNAseq_log2FC %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = 'GeneSymbol') %>% 
+  mutate(GeneSymbol = gsub('(.+)_\\d+','\\1',GeneSymbol)) %>%
+  filter(GeneSymbol %in% RTqPCR_genes) %>% 
+  filter(!duplicated(GeneSymbol))
+
+# shared genes
+shared_genes <- RNAseq_log2FC$GeneSymbol
+
+# long format data frames
+RTqPCR_log2expr_long <- RTqPCR_log2expr %>% 
+  select(shared_genes, 'volunteer', 'time') %>% 
+  pivot_longer(shared_genes, names_to = 'GeneSymbol', values_to = 'log2FC') %>% 
+  mutate(type = 'rtqpcr',
+         volunteer = as.character(volunteer),
+         time = as.character(time))
+
+RNAseq_log2FC_long <- RNAseq_log2FC %>% 
+  column_to_rownames(var = 'GeneSymbol') %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  mutate(volunteer = gsub('(v\\d+) .*','\\1',rownames(.)),
+         time = gsub('v\\d+ (day\\d+)_day0','\\1',rownames(.))) %>% 
+  select(shared_genes, 'volunteer', 'time') %>% 
+  pivot_longer(shared_genes, names_to = 'GeneSymbol', values_to = 'log2FC') %>% 
+  mutate(type = 'rnaseq')
+
+# long format gene mean expression per time point
+RTqPCR_log2expr_long_mean <- RTqPCR_log2expr_long %>% 
+  filter(!volunteer %in% c('v1','v2')) %>% 
+  group_by(GeneSymbol, time) %>% 
+  summarise(log2FC = mean(log2FC)) %>% 
+  arrange(factor(GeneSymbol, levels = shared_genes),
+          factor(time, levels = names(colPals$time))) %>% 
+  mutate(type = 'rtqpcr')
+
+RNAseq_log2FC_long_mean <- RNAseq_log2FC_long %>% 
+  filter(!volunteer %in% c('v1','v2')) %>% 
+  group_by(GeneSymbol, time) %>% 
+  summarise(log2FC = mean(log2FC)) %>% 
+  arrange(factor(GeneSymbol, levels = shared_genes),
+          factor(time, levels = names(colPals$time))) %>% 
+  mutate(type = 'rnaseq')
+
+```
+
+
+## Correlation
+
+```{r}
+# we exclude V1 and V2 due to high variability and inflated expression measurements
+volunteer_order <- paste('v', seq(3,8), sep = '')
+time_order <- paste('day', c(0,7,14,21,28), sep = '')
+
+# calculate correlations
+res_cor <- lapply(setNames(shared_genes, shared_genes), function(x) {
+  
+  rtqpcr_log2FC <- RTqPCR_log2expr_long %>% 
+    filter(volunteer %in% volunteer_order & GeneSymbol == x) %>% 
+    arrange(factor(volunteer, levels = volunteer_order),
+            factor(time, levels = time_order)) %>% 
+    pull(log2FC)
+  
+  rnaseq_log2FC <- RNAseq_log2FC_long %>% 
+    filter(volunteer %in% volunteer_order & GeneSymbol == x) %>% 
+    arrange(factor(volunteer, levels = volunteer_order),
+            factor(time, levels = time_order)) %>% 
+    pull(log2FC)
+  
+  rtqpcr_rnaseq_cor <- cor(rtqpcr_log2FC, rnaseq_log2FC, method = "pearson")
+  
+  data.frame(GeneSymbol = x,
+             r = rtqpcr_rnaseq_cor)
+  
+}) %>% bind_rows()
+
+
+# calculate correlations per volunteer
+gene_volunteer_comb <- expand.grid(list(GeneSymbol = shared_genes, 
+                                        volunteer = unique(volunteer))) %>% 
+  filter(!duplicated(.))
+gene_volunteer_comb <- split(gene_volunteer_comb, seq(nrow(gene_volunteer_comb)))
+
+res_cor_by_volunteer <- lapply(gene_volunteer_comb, function(x) {
+  
+  rtqpcr_log2FC <- RTqPCR_log2expr_long %>% 
+    filter(volunteer == x$volunteer & GeneSymbol == x$GeneSymbol) %>% 
+    arrange(factor(time, levels = time_order)) %>% 
+    pull(log2FC)
+  
+  rnaseq_log2FC <- RNAseq_log2FC_long %>% 
+    filter(volunteer == x$volunteer & GeneSymbol == x$GeneSymbol) %>% 
+    arrange(factor(time, levels = time_order)) %>% 
+    pull(log2FC)
+  
+  rtqpcr_rnaseq_cor <- cor(rtqpcr_log2FC, rnaseq_log2FC, method = "pearson")
+  
+  data.frame(volunteer = x$volunteer,
+             GeneSymbol = x$GeneSymbol,
+             r = rtqpcr_rnaseq_cor)
+  
+}) %>% bind_rows()
+
+res_cor_by_volunteer_mean <- res_cor %>% 
+  group_by(GeneSymbol) %>% 
+  summarise(r_mean = mean(r))
+
+```
+
+```{r, fig.height=6,fig.width=10}
+selected_genes <- c('DUSP1','DUSP2','DUSP4','DUSP10','JUN','JUND','FOS','SOCS1')
+
+df <- bind_rows(RTqPCR_log2expr_long,
+                RNAseq_log2FC_long) %>% 
+  filter(!volunteer %in% c('v1','v2')) %>% 
+  mutate(r = recode(GeneSymbol, !!!setNames(res_cor$r,
+                                            nm = res_cor$GeneSymbol))) %>% 
+  filter(GeneSymbol %in% selected_genes) %>% 
+  mutate(GeneSymbol = factor(GeneSymbol, levels = selected_genes),
+         time = factor(time, levels = names(colPals$time)),
+         type = factor(type, levels = names(colPals$rtqpcr_rnaseq)))
+
+df2 <- bind_rows(RTqPCR_log2expr_long_mean,
+                 RNAseq_log2FC_long_mean) %>% 
+  mutate(r = recode(GeneSymbol, !!!setNames(res_cor$r,
+                                            nm = res_cor$GeneSymbol))) %>% 
+  filter(GeneSymbol %in% selected_genes) %>% 
+  mutate(GeneSymbol = factor(GeneSymbol, levels = selected_genes),
+         time = factor(time, levels = names(colPals$time)),
+         type = factor(type, levels = names(colPals$rtqpcr_rnaseq)))
+
+ggplot(df, aes(x=time, y=log2FC, color=type)) +
+  geom_hline(yintercept = 0, color='grey80', size=1) +
+  geom_point(shape=16, size=3, stroke=0, alpha=0.4) +
+  facet_wrap(~GeneSymbol, ncol=4, scales = 'free') +
+  geom_line(data = df2, aes(x=time, y=log2FC, group=type, color=type), size = 1.25) +
+  geom_point(data = df2, aes(x=time, y=log2FC, group=type, fill=time), shape=21, size=3.5, stroke=1.25) +
+  geom_text(aes(label=paste('r =',round(r,2)), group=r),x = -Inf, y = Inf, hjust = -0.2, vjust = 1.8, inherit.aes = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(.1, .25))) +
+  xlab('') +
+  ylab('Relative quantification (log2FC)') +
+  scale_color_manual(values = c(colPals$time, colPals$rtqpcr_rnaseq)) +
+  scale_fill_manual(values = c(colPals$time, colPals$rtqpcr_rnaseq)) +
+  theme_bw() +
+  theme(
+    text = element_text(family = 'Arial', size = 14),
+    axis.text.x.bottom = element_text(angle = 90, hjust = 1, vjust = 0.5),
+    panel.border = element_rect(color = "black", fill = NA, size = 2),
+    axis.ticks = element_line(color = "black", size = 1.25),
+    axis.ticks.length = unit(1.5, 'mm'),
+    panel.grid.major.x = element_blank(), 
+    panel.grid.minor.x = element_blank(),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor.y = element_blank(),
+    legend.position = 'top',
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold.italic"),
+    strip.text.y = element_text(angle = 90)
+  )
+
+```
+
+```{r}
+ggsave(filename = "plots/fig2B_RTqPCR_RNAseq_selected_log2FC.pdf", width = 10, height = 6, units = "in", dpi = 300, device = cairo_pdf)
+
+```
+
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+
+```
