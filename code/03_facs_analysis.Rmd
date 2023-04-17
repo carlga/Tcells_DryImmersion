@@ -1,0 +1,197 @@
+---
+title: "Step 3.2: FACS analysis"
+author: "Carlos Gallardo & Christian Oertlin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+# Set path
+path <- strsplit(dirname(rstudioapi::getActiveDocumentContext()$path), '/')[[1]]
+path <- path[-c(length(path))]
+path <- paste(path, collapse = '/')
+knitr::opts_knit$set(root.dir = path)
+knitr::opts_chunk$set(echo = T, message = F, warning = F, dev = 'cairo_pdf')
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  size <- 'scriptsize'
+  x <- def.chunk.hook(x, options)
+  paste0("\n \\", size, "\n\n", x, "\n\n \\normalsize")
+})
+
+```
+
+```{r}
+# Import libraries and helper functions
+source("code/helper_functions.R")
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(RColorBrewer)
+library(openxlsx)
+
+# Colors
+colPals <- vector(mode = "list")
+colPals$time <- setNames(c("#FBAA3E", "#2C83BE", "#3EB6BD", "#A3D5B3", "#CD71A8"),
+                         nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_light <- setNames(c("#FDD6A1", "#A2CDE9", "#AFE2E5", "#DDF0E3", "#E8BDD6"),
+                               nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_dark <- setNames(c("#D87E04", "#174564", "#1F5C60", "#49A065", "#AA3C7E"),
+                              nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$inferno <- c("#000004", "#420A68", "#932667", "#DD513A", "#FCA50A", "#FCFFA4")
+colPals$blood_cells <- setNames(c("#E54D34","#77A2D5","#B58B80"),
+                                nm = c("granulocytes", "lymphocytes", "monocytes"))
+colPals$cell_types <- setNames(c("#83D1F6","#FBAA3E","#FCCA7C","#B58B80","#E54D34",
+                                 "#B3177E","#9A509F","#77A2D5","#CAC1DD","#36B449","#C1C1C1"),
+                               nm = c("B cell", "Macrophage M1", "Macrophage M2", 
+                                      "Monocyte", "Neutrophil", "NK cell", 
+                                      "T cell CD4+ (non-regulatory)", "T cell CD8+", 
+                                      "T cell regulatory (Tregs)", "Myeloid dendritic cell", 
+                                      "uncharacterized cell"))
+colPals$RdBu <- brewer.pal(11, name = "RdBu")
+colPals$biotype <- setNames(c("#395982","#49BED9","#18A38A","#36B449","#826F99",
+                              "#9852A5","#FBAA3E","#FCCA7C","#FCFFA4","#C1C1C1"),
+                            nm = c("protein_coding", "lncRNA", "miRNA", "snoRNA",
+                                   "IG_C_gene", "IG_V_gene", "TR_C_gene",
+                                   "TR_J_gene", "TR_V_gene", "other"))
+colPals$rtqpcr_rnaseq <- setNames(c("#B80D48","#2B6A6C"),
+                                  nm = c("rtqpcr", "rnaseq"))
+
+```
+
+
+# Load data
+
+```{r}
+# FACS data
+filenames <- list.files(path= "data/facs", pattern = "^facs_",full.names = T)
+
+facs_data <- lapply(filenames, function(x) {
+  
+  valunteer <- gsub('.*(v\\d+).*', '\\1', x)
+  
+  df <- read.table(file = x,
+                   stringsAsFactors = F,
+                   sep = ",",
+                   header = T,
+                   fill = T,
+                   quote = "")
+  
+  colnames(df) <- c('time', 'gate', 'perc_among_CD3', 'perc_among_lymphocytes',
+                    'MFI', 'MFI_CD25_peak_vs_MFI_contr_lymph_peak')
+  
+  df <- df %>% 
+    add_column(volunteer = valunteer, .before = 'time') %>% 
+    mutate(perc_among_CD3 = as.numeric(perc_among_CD3),
+           perc_among_lymphocytes = as.numeric(perc_among_lymphocytes),
+           MFI = as.numeric(MFI),
+           MFI_CD25_peak_vs_MFI_contr_lymph_peak = as.numeric(MFI_CD25_peak_vs_MFI_contr_lymph_peak))
+  
+  df
+  
+}) %>% bind_rows()
+
+```
+
+
+# Mean MFI of CD25 over control
+
+```{r, fig.height=4.5, fig.width=6}
+# mean fluorescence intensity (MFI) at different time points
+df <- facs_data %>% 
+  filter(volunteer %in% paste0('v', seq(1,8))) %>% 
+  filter(!is.na(MFI_CD25_peak_vs_MFI_contr_lymph_peak)) %>% 
+  filter(MFI_CD25_peak_vs_MFI_contr_lymph_peak != 0) %>% 
+  mutate(time = recode(time, !!!setNames(names(colPals$time),
+                                         nm = c('-7d','7d','14d','21d','+7d')))) %>% 
+  filter(time %in% names(colPals$time)) %>% 
+  mutate(time = factor(time, levels = names(colPals$time)))
+
+df2 <- df %>% 
+  group_by(time) %>% 
+  select(time, MFI_CD25_peak_vs_MFI_contr_lymph_peak) %>% 
+  summarize_each(dplyr::funs(mean, sd, se=sd(.)/sqrt(n())), MFI_CD25_peak_vs_MFI_contr_lymph_peak)
+
+ggplot() +
+  geom_point(data = df, aes(x=time, y=MFI_CD25_peak_vs_MFI_contr_lymph_peak, color=time), 
+             shape=16, size=4, stroke=0, alpha=0.5) +
+  geom_errorbar(data=df2, aes(x=time, y=mean, ymin=mean-se*1.96, ymax=mean+se*1.96), width=.2, lwd=1.5) +
+  # geom_line(data = df2, aes(x=time, y=mean, group=1), color='black', size = 1.5) +
+  geom_point(data = df2, aes(x=time, y=mean, fill=time), color="black", shape=21, size=5, stroke=2, alpha=1) +
+  scale_y_continuous(expand = expansion(mult = c(.05, .05))) +
+  scale_color_manual(values = colPals$time) +
+  scale_fill_manual(values = colPals$time) +
+  xlab('') +
+  ylab('MFI CD25 / MFI Control') +
+  theme_bw(base_size = 20) +
+  theme(panel.grid.major.y = element_line(color = "grey80", linetype = "solid", size = 1), 
+        panel.grid.minor.y = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank(),
+        panel.border = element_rect(color = "black", fill = NA, size = 2),
+        axis.ticks = element_line(color = "black", size = 1.25),
+        legend.position = "none"
+  )
+
+```
+
+```{r}
+ggsave(filename = "plots/fig3C_FACS_MFI_CD25_over_control.pdf", width = 6, height = 4.5, units = "in", dpi = 300, device = cairo_pdf)
+
+```
+
+```{r}
+# perform paired t-tests
+tests_comb <- expand.grid(time1 = names(colPals$time), time2 = names(colPals$time)) %>% 
+  filter(time1 != time2) %>% 
+  t() %>% 
+  as.data.frame()
+
+res_t_test <- lapply(tests_comb, function(x) {
+  time1 <- x[1]
+  time2 <- x[2]
+  
+  group1 <- df %>% 
+    filter(time == time1) %>% 
+    pull(MFI_CD25_peak_vs_MFI_contr_lymph_peak)
+  
+  id1 <- df %>% 
+    filter(time == time1) %>% 
+    pull(volunteer)
+  
+  group2 <- df %>% 
+    filter(time == time2) %>% 
+    pull(MFI_CD25_peak_vs_MFI_contr_lymph_peak)
+  
+  id2 <- df %>% 
+    filter(time == time2) %>% 
+    pull(volunteer)
+  
+  test_table <- data.frame(volunteer = unique(df$volunteer)) %>% 
+    mutate(group1 = recode(volunteer, !!!setNames(group1,
+                                                  id1)),
+           group2 = recode(volunteer, !!!setNames(group2,
+                                                  id2))) %>% 
+    mutate(group1 = as.numeric(group1),
+           group2 = as.numeric(group2))
+  
+  c(time_1 = time1,
+    time_2 = time2,
+    p_val = t.test(test_table$group1, test_table$group2, paired = T)$p.value)
+  
+}) %>% bind_rows() %>% 
+  mutate(p_adj = p.adjust(p_val, method = 'BH'))
+
+res_t_test
+
+```
+
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+
+```
