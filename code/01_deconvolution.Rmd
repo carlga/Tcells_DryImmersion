@@ -1,0 +1,290 @@
+---
+title: "Step 1.2: Cell type deconvolution"
+author: "Carlos Gallardo & Christian Oertlin"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document:
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+# Set path
+path <- strsplit(dirname(rstudioapi::getActiveDocumentContext()$path), '/')[[1]]
+path <- path[-c(length(path))]
+path <- paste(path, collapse = '/')
+knitr::opts_knit$set(root.dir = path)
+knitr::opts_chunk$set(echo = T, message = F, warning = F, dev = 'cairo_pdf')
+def.chunk.hook  <- knitr::knit_hooks$get("chunk")
+knitr::knit_hooks$set(chunk = function(x, options) {
+  size <- 'scriptsize'
+  x <- def.chunk.hook(x, options)
+  paste0("\n \\", size, "\n\n", x, "\n\n \\normalsize")
+})
+
+```
+
+```{r}
+# Import libraries and helper functions
+source("code/helper_functions.R")
+library(tidyverse)
+library(magrittr)
+library(patchwork)
+library(immunedeconv)
+library(RColorBrewer)
+library(broom)
+
+# Colors
+colPals <- vector(mode = "list")
+colPals$time <- setNames(c("#FBAA3E", "#2C83BE", "#3EB6BD", "#A3D5B3", "#CD71A8"),
+                         nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_light <- setNames(c("#FDD6A1", "#A2CDE9", "#AFE2E5", "#DDF0E3", "#E8BDD6"),
+                               nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$time_dark <- setNames(c("#D87E04", "#174564", "#1F5C60", "#49A065", "#AA3C7E"),
+                              nm = c("day0", "day7", "day14", "day21", "day28"))
+colPals$inferno <- c("#000004", "#420A68", "#932667", "#DD513A", "#FCA50A", "#FCFFA4")
+colPals$blood_cells <- setNames(c("#E54D34","#77A2D5","#B58B80"),
+                                nm = c("granulocytes", "lymphocytes", "monocytes"))
+colPals$cell_types <- setNames(c("#83D1F6","#FBAA3E","#FCCA7C","#B58B80","#E54D34",
+                                 "#B3177E","#9A509F","#77A2D5","#CAC1DD","#36B449","#C1C1C1"),
+                               nm = c("B cell", "Macrophage M1", "Macrophage M2", 
+                                      "Monocyte", "Neutrophil", "NK cell", 
+                                      "T cell CD4+ (non-regulatory)", "T cell CD8+", 
+                                      "T cell regulatory (Tregs)", "Myeloid dendritic cell", 
+                                      "uncharacterized cell"))
+
+```
+
+
+# Load data
+
+```{r}
+# RNA-seq
+RNAseq <- readRDS(file='data/rnaseq/rnaseq_volunteers_9&10_excl.rds')
+DESeq2_DEGs <- readRDS(file='data/rnaseq/DESeq2_DEGs_unfilt_volunteers_9&10_excl.rds')
+DESeq2_DEGs_filt <- readRDS(file='data/rnaseq/DESeq2_DEGs_filt_volunteers_9&10_excl.rds')
+
+# FACS
+facs_frac <- read.table(file = 'data/facs/cellType_percentages_facs.csv',
+                        stringsAsFactors = F,
+                        sep = ",",
+                        header = T)
+
+```
+
+
+# Cell type fractions (FACS)
+
+```{r}
+df <- facs_frac %>% 
+  pivot_longer(day0:day28, names_to = 'time', values_to = 'fraction') %>% 
+  filter(!(is.na(fraction))) %>% 
+  mutate(fraction = fraction/100,
+         type = factor(type, levels = c('monocytes','lymphocytes','granulocytes')),
+         time = factor(time, levels = names(colPals$time))) %>% 
+  group_by(time, type) %>% 
+  summarize_each(dplyr::funs(mean, 
+                             sd, 
+                             se=sd(.)/sqrt(n())), fraction) 
+
+df
+
+```
+
+```{r, fig.width=6, fig.height=5}
+ggplot(df, aes(x=time, y=mean, group=type, fill=type)) +
+  geom_bar(stat="identity", position = position_dodge(0.9), width = 0.7, size=1, color='black') +
+  geom_errorbar(aes(ymin=mean, ymax=mean+se*1.96), width=.6, lwd=1, position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = colPals$blood_cells) +
+  scale_x_discrete(limits=rev) +
+  scale_y_continuous(limits = c(0,0.8), 
+                     breaks = seq(0,0.6,0.2),
+                     expand = expansion(mult = c(.01, .05))) +
+  coord_flip() +
+  xlab("") +
+  ylab("Cell type fraction") +
+  ggtitle("Whole blood cell fractions (FACS)") +
+  theme_bw(base_size = 20) +
+  theme(
+    title = element_text(size=15),
+    panel.grid.major.x = element_line(color = "grey80", linetype = "solid", size = 1.25),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 2),
+    axis.ticks = element_line(color = "black", size = 1.25), 
+    legend.position = 'right',
+    legend.title = element_blank(),
+    legend.justification = 'top',
+    legend.text = element_text(size=10)
+  )
+
+```
+
+```{r}
+ggsave(filename = "plots/fig1B_whole_blood_cell_fraction.pdf", width = 6, height = 5, units = "in", dpi = 300, device = cairo_pdf)
+
+```
+
+
+# Cell type deconvolution (quantiseq)
+
+```{r}
+# Run deconvolution
+df <- RNAseq$filt$cpm %>% 
+  rownames_to_column(var = 'GeneSymbol') %>% 
+  mutate(GeneSymbol = gsub('(.+)_\\d+', '\\1', GeneSymbol)) %>% 
+  filter(!duplicated(GeneSymbol)) %>% 
+  column_to_rownames(var = 'GeneSymbol')
+rnaseq_deconv <- immunedeconv::deconvolute(df, method = "quantiseq")
+
+df <- rnaseq_deconv %>% 
+  column_to_rownames(var = 'cell_type') %>% 
+  t() %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = 'sample') %>% 
+  left_join(RNAseq$filt$design, by = 'sample') %>% 
+  pivot_longer(`B cell`:`uncharacterized cell`, names_to = 'cell_type', values_to = 'fraction')
+
+```
+
+
+## Without non-T cell types
+
+```{r, fig.width=7, fig.height=5}
+df2 <- df %>% 
+  filter(cell_type %in% c('T cell CD4+ (non-regulatory)',
+                          'T cell CD8+',
+                          'T cell regulatory (Tregs)')) %>% 
+  mutate(cell_type = factor(cell_type, 
+                            levels = c('T cell CD8+',
+                                       'T cell regulatory (Tregs)',
+                                       'T cell CD4+ (non-regulatory)'))) %>% 
+  group_by(time, cell_type) %>% 
+  summarize_each(dplyr::funs(mean, sd, se=sd(.)/sqrt(n())), fraction) 
+
+ggplot(df2, aes(x=time, y=mean, group=cell_type, fill=cell_type)) +
+  geom_bar(stat="identity", position = position_dodge(0.9), width = 0.7, size=1, color='black') +
+  geom_errorbar(aes(ymin=mean, ymax=mean+se*1.96), width=.6, lwd=1, position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = colPals$cell_types) +
+  scale_x_discrete(limits=rev) +
+  scale_y_continuous(limits = c(0,0.6), 
+                     breaks = seq(0,0.6,0.2),
+                     expand = expansion(mult = c(.01, .05))) +
+  coord_flip() +
+  xlab("") +
+  ylab("Cell type fraction") +
+  ggtitle("RNAseq deconvolution (quantiseq)") +
+  theme_bw(base_size = 20) +
+  theme(
+    title = element_text(size=15),
+    panel.grid.major.x = element_line(color = "grey80", linetype = "solid", size = 1.25),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 2),
+    axis.ticks = element_line(color = "black", size = 1.25), 
+    legend.position = 'right',
+    legend.title = element_blank(),
+    legend.justification = 'top',
+    legend.text = element_text(size=10)
+  )
+
+```
+
+```{r}
+ggsave(filename = "plots/fig1C_cell_type_deconvolution.pdf", width = 7, height = 5, units = "in", dpi = 300, device = cairo_pdf)
+
+```
+
+```{r}
+# Perform paired t-tests
+T_cell_types <- c('T cell CD4+ (non-regulatory)', 'T cell regulatory (Tregs)', 'T cell CD8+')
+comparisons <- c('day7_day0','day14_day0','day21_day0','day28_day0')
+tests_comb <- expand.grid(cell_type = T_cell_types, time_comp = comparisons) %>% 
+  t() %>% 
+  as.data.frame()
+
+res_t_test <- lapply(tests_comb, function(x) {
+  cell <- x[1]
+  time1 <- str_split(x[2], pattern = '_')[[1]][1]
+  time2 <- str_split(x[2], pattern = '_')[[1]][2]
+  
+  group1 <- df %>% 
+    filter(cell_type == cell & time == time1) %>% 
+    pull(fraction)
+  
+  group2 <- df %>% 
+    filter(cell_type == cell & time == time2) %>% 
+    pull(fraction)
+  
+  c(cell_type = cell,
+    time_1 = time1,
+    time_2 = time2,
+    p_val = t.test(group1, group2, paired = T)$p.value)
+  
+}) %>% bind_rows() %>% 
+  mutate(p_adj = p.adjust(p_val, method = 'BH'))
+
+res_t_test
+
+```
+
+
+## Including non-T cell types
+
+```{r, fig.width=8, fig.height=5}
+df2 <- df %>% 
+  mutate(cell_type = factor(cell_type, 
+                            levels = names(colPals$cell_types))) %>% 
+  group_by(time, cell_type) %>% 
+  summarize_each(dplyr::funs(mean, sd, se=sd(.)/sqrt(n())), fraction) 
+
+ggplot(df2, aes(x=time, y=mean, group=cell_type, fill=cell_type)) +
+  geom_bar(stat="identity", position = position_dodge(0.9), width = 0.7, size=1, color='black') +
+  geom_errorbar(aes(ymin=mean, ymax=mean+se*1.96), width=.6, lwd=1, position = position_dodge(width = 0.9)) +
+  scale_fill_manual(values = colPals$cell_types) +
+  scale_y_continuous(limits = c(0,0.6), 
+                     breaks = seq(0,0.6,0.2),
+                     expand = expansion(mult = c(.01, .05))) +
+  xlab("") +
+  ylab("Cell type fraction (RNAseq)") +
+  theme_bw(base_size = 20) +
+  theme(
+    title = element_text(size=15),
+    panel.grid.major.y = element_line(color = "grey80", linetype = "solid", size = 1.25),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 2),
+    axis.ticks = element_line(color = "black", size = 1.25), 
+    legend.position = 'top',
+    legend.title = element_blank(),
+    legend.justification = 'top',
+    legend.text = element_text(size=10)
+  )
+
+```
+
+```{r}
+ggsave(filename = "plots/figS5_cell_type_deconvolution_all.pdf", width = 8, height = 5, units = "in", dpi = 300, device = cairo_pdf)
+
+```
+
+
+# Exports
+
+```{r}
+openxlsx::write.xlsx(
+  list(cell_type_fractions = df,
+       t_tests = res_t_test),
+  file = "tables/dataS2_RNAseq_deconvolution.xlsx",
+  rowNames=F,
+  overwrite=T
+)
+
+```
+
+
+# SessionInfo
+
+```{r}
+sessionInfo()
+
+```
