@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/629016463.svg)](https://zenodo.org/badge/latestdoi/629016463)
+
 # T Cell Dry Immersion Bed Study
 
 This repository contains necessary files to evaluate and reproduce the core data analysis steps
