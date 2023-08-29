@@ -22,7 +22,8 @@ followed by RNA sequencing.
 
 ## Citation
 
-If using the data or code for analysis please cite the [study]().
+If using the data or code for analysis please cite the [study](https://doi.org/10.1126/sciadv.adg1610).
 
-> Exposure of volunteers to dry immersion bed over 21 days results in gene 
-> expression changes and adaptation of T cells.
+> Carlos J. Gallardo-Dodd et al., Exposure of volunteers to microgravity by dry immersion bed over 21 
+> days results in gene expression changes and adaptation of T cells. *Sci. Adv.* **9**, eadg1610 (2023). 
+> DOI: [10.1126/sciadv.adg1610](https://doi.org/10.1126/sciadv.adg1610)
